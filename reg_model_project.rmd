@@ -1,0 +1,295 @@
+---
+title: "Modeling and prediction for movies"
+name: "Julian Cuero"
+date: "November 3 2020"
+output: 
+  html_document: 
+    fig_height: 4
+    highlight: pygments
+    theme: spacelab
+---
+
+## Setup
+
+### Load packages
+
+```{r load-packages, message = FALSE}
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(GGally)
+```
+
+### Load data
+
+```{r load-data}
+load("movies.Rdata")
+```
+
+* * *
+
+## Part 1: Data
+The data set contains a random sample of **651 movies** produced and released before 2016. According to IMDb (one of the sources of the information along Rotten Tomatoes), movies data comes from various sources like on-screen credits, press kits, official bios, autobiographies, interviews, among others.
+
+Furthermore, data is submitted by people in the industry and visitors, and also from studios and filmmakers. In addition, data goes through consistency checks to ensure it is as accurate and reliable as possible. Nevertheless, because of the sheer volume and the nature of the information listed, **occasional mistakes are inevitable** and, when spotted/reported, they are promptly verified and fixed.
+
+Because the sample is less than 10% of the whole population of movies out there, it's fair to say that the sample is independent. However, it may not be representative because most of the movies collected are American and do not represent all the countries, therefore, **it's not possible to ensure causality** between the results found in this project and real life, because there might be mistakes in data collection as stated above.
+
+**Source:** <https://help.imdb.com/article/imdb/general-information/where-does-the-information-on-imdb-come-from/GGD7NGF5X3ECFKNN?ref_=helpart_nav_24#>
+
+
+* * *
+
+## Part 2: Research question
+Some people like a movie depending on its genre, others might like it because of an specific actor/actress, while others might be influenced by "experts" opinion, so I wondered **what characteristics make a movie popular?** In this case, the response variable will be audience_score which will serve as a measure of popularity.
+
+* * *
+
+## Part 3: Exploratory data analysis
+Remove duplicates
+```{r}
+# There was one duplicate: The movie titled "Man on Wire"
+movies <- movies[!duplicated(movies),]
+```
+
+#### Check relationships for categorical variables and response variable
+
+**title_type** - Documentaries and tv movies tend to obtain higher audience scores
+
+```{r}
+movies %>% ggplot(aes(y=audience_score, color=title_type)) + geom_boxplot()
+```
+
+**genre** - Again, documentaries tend to have higher scores as well as horror movies
+```{r}
+movies %>% group_by(genre) %>% summarise(mean_score=mean(audience_score)) %>%
+    ggplot(aes(x=reorder(genre, mean_score), y=mean_score, fill=genre)) +
+    geom_bar(stat="identity") + xlab("Genre") + ylab("Mean audience score") + theme(axis.text.x=element_blank(), axis.ticks.x=element_blank())
+```
+
+
+**mpaa_rating** - General audiences movies evidenced greater audience scores than restricted and adults only rated movies
+
+```{r}
+movies %>% group_by(mpaa_rating) %>% summarise(mean_score=mean(audience_score)) %>%
+    ggplot(aes(x=reorder(mpaa_rating, -mean_score), y=mean_score, fill=mpaa_rating)) + geom_bar(stat="identity") +
+    xlab("MPAA rating") + ylab("Mean audience score")
+```
+
+
+**critics_rating** - As the movie gets a better critic rating (Certified fresh, for example) it will also increase its score
+
+```{r}
+movies %>% group_by(critics_rating) %>% summarise(mean_score=mean(audience_score)) %>%
+    ggplot(aes(x=reorder(critics_rating, mean_score), y=mean_score, fill=critics_rating)) +
+    geom_bar(stat="identity") + xlab("Critics rating") + ylab("Mean audience score")
+```
+
+**audience_rating** - Something similar as the critic rating, however, audience rating and audience score may be dependent because they come from the same source (audience)
+
+```{r}
+movies %>% group_by(audience_rating) %>% summarise(mean_score=mean(audience_score)) %>%
+    ggplot(aes(x=audience_rating,y=mean_score)) + geom_bar(stat="identity") + ylab("Mean audience score") + xlab("Audience rating")
+```
+
+Whether or not the movie won or was nominated for a best picture Oscar enhances its probability to get a higher audience score. It also seems to be important the fact that the movie made part of the Top 200 Box Office list
+
+```{r}
+movies[,c("best_pic_nom","best_pic_win","best_actor_win","best_actress_win","best_dir_win","top200_box", "audience_score")] %>%
+   gather(variable,value,-audience_score) %>% group_by(variable,value) %>%
+    summarise(mean_score=mean(audience_score)) %>% ggplot(aes(x=reorder(variable, mean_score), y=mean_score, fill=value)) +
+    geom_bar(stat="identity", position="dodge") + xlab(element_blank())
+```
+
+#### Check relationships for numerical variables and response variable (audience_score) with the correlation coefficient
+
+* runtime: 0.182 - Low
+* imdb_rating: 0.865 - High
+* imdb_num_votes: 0.290 - Low
+* critics_score: 0.703 - High
+
+```{r}
+ggpairs(movies[,c("audience_score", "runtime", "imdb_rating", "imdb_num_votes", "critics_score")])
+```
+
+There is very little correlation between date related variables and audience score
+
+```{r}
+summarise(na.omit(movies), thtr_rel_year=cor(audience_score, thtr_rel_year),
+          thtr_rel_month = cor(audience_score, thtr_rel_month),
+          thtr_rel_day = cor(audience_score, thtr_rel_day),
+          dvd_rel_year = cor(audience_score, dvd_rel_year),
+          dvd_rel_month = cor(audience_score, dvd_rel_month),
+          dvd_rel_day = cor(audience_score, dvd_rel_day)
+          )
+```
+
+* * *
+
+## Part 4: Modeling
+From EDA, variables that seemed to have higher relationship with audience score were:
+
+- title_type
+- genre
+- mpaa_rating
+- critics_rating
+- top200_box
+- best_pic_win
+- best_pic_nom
+- imdb_rating
+- critics_score
+
+Which will be included for the initial model. Having said that, the criteria to include variables for the final model will be based using a **backwards model selection** approach, excluding a variable if its **p-value is large** compared to the rest of explanatory variables and also checking if the **adjusted R squared** increases.
+
+
+```{r}
+# First fit
+mlr1 <- with(movies, lm(audience_score ~ title_type + genre + mpaa_rating +
+                                critics_rating + top200_box + best_pic_win +
+                                best_pic_nom + imdb_rating + critics_score))
+summary(mlr1)
+summary(mlr1)$adj.r.squared
+```
+
+```{r}
+# Second fit: critics_score removed
+mlr2 <- with(movies, lm(audience_score ~ title_type + genre + mpaa_rating +
+                                critics_rating + top200_box + best_pic_win +
+                                best_pic_nom + imdb_rating))
+summary(mlr2)
+summary(mlr2)$adj.r.squared
+```
+
+
+```{r}
+# Third fit: top200_box removed
+mlr3 <- with(movies, lm(audience_score ~ title_type + genre + mpaa_rating +
+                                critics_rating + best_pic_win + imdb_rating +
+                                best_pic_nom))
+summary(mlr3)
+summary(mlr3)$adj.r.squared
+```
+
+
+```{r}
+# Fourth fit: title_type removed
+mlr4 <- with(movies, lm(audience_score ~  genre + critics_rating + mpaa_rating +
+                                  best_pic_win + imdb_rating + best_pic_nom
+                                ))
+summary(mlr4)
+summary(mlr4)$adj.r.squared
+```
+
+```{r}
+# Fifth fit: mpaa_rating removed
+mlr5 <- with(movies, lm(audience_score ~  genre + critics_rating +
+                                + imdb_rating + best_pic_win + best_pic_nom))
+summary(mlr5)
+summary(mlr5)$adj.r.squared
+```
+
+```{r}
+# Sixth fit: best_pic_win removed
+mlr6 <- with(movies, lm(audience_score ~ genre + critics_rating +
+                                + imdb_rating + best_pic_nom))
+summary(mlr6)
+summary(mlr6)$adj.r.squared
+```
+
+```{r}
+# Seventh fit: best_pic_nom removed
+mlr7 <- with(movies, lm(audience_score ~ genre + critics_rating + imdb_rating))
+summary(mlr7)
+summary(mlr7)$adj.r.squared
+```
+
+By removing **best_pic_nom** the adjusted R squared decreased, so the sixth model (**mlr6**) is chosen.
+Final adjusted R squared: **0.7661102**.
+
+The final model explains **77% of the variability in audience score** based on the R squared. It's worth noting some slopes/coefficients of the the model:
+
+- An increase of 1 unit in the **imdb rating** may result in an increase of 14.8 for the audience score on average
+- On average, movies with **genre** "Mystery & Suspense" obtain a lower audience score by 6.17 points
+- If the movie was **nominated for the best picture Oscar** we would expect its audience score to be higher by 2.35 points on average
+- The movie audience score may decrease 4.95 points on average if it gets a "Rotten" **critic rating**
+
+
+
+#### Diagnostics
+
+1. **Linearity**: Explanatory variables and response variable follow a linear relationship.
+
+```{r}
+ggplot(data=movies,aes(x=imdb_rating, y=audience_score)) + geom_point() + geom_smooth(method="lm")
+```
+
+2. **Nearly normal residuals centered at 0:**
+Residuals seem to be fairly centered at zero
+
+```{r}
+mlr6 %>% ggplot(aes(x=.resid)) + geom_histogram(binwidth = 5)
+```
+
+
+3. **Constant variability** (predicted values vs residuals):
+Residuals locate constantly between 25 and -25, however, points
+do not behave in a completely random manner
+
+```{r}
+mlr6 %>% ggplot(aes(x=.fitted,y=.resid)) + geom_point() +
+    geom_hline(yintercept = 0, linetype="dashed")
+```
+
+4. **Independent explanatory variables**
+
+Model variables are: **genre, critics_rating, imdb_rating and best_pic_nom**
+
+**imdb_rating** seems to have a positive relationship with **critics_rating**
+
+```{r}
+ggplot(movies, aes(x=imdb_rating, fill=critics_rating)) + geom_histogram()
+```
+
+* * *
+
+## Part 5: Prediction
+- **Movie**: Doctor Strange
+- **genre**: Adventure, Action, Fantasy or "Action & Adventure"
+- **critics_rating**: Fresh
+- **imdb_rating**: 7.5
+- **best_pic_nom**: "no"
+- **Real audience score**: 86
+
+
+**Sources:** 
+<https://www.rottentomatoes.com/m/doctor_strange_2016>
+<https://en.wikipedia.org/wiki/Doctor_Strange_(2016_film)#Accolades>
+<https://www.imdb.com/title/tt1211837/>
+
+```{r}
+doc_strange <- data.frame(genre="Action & Adventure", critics_rating="Fresh", imdb_rating=7.5, best_pic_nom="no")
+```
+
+The model predicted an audience score of **78.36**
+
+```{r}
+predict(mlr6, doc_strange)
+```
+
+**Prediction interval**
+
+```{r}
+predict(mlr6, doc_strange, interval = "prediction", level=0.95)
+```
+
+There is a 95% confidence that the movie Doctor Strange, which genre belongs to "Action & Adventure", with a "Fresh" critic rating, an imdb_rating of 7.5 and that wasn't nominated for a best picture Oscar price will have an audience score between 58.94 and 97.78
+
+
+* * *
+
+## Part 6: Conclusion
+With these results I realized that some of the most significant
+significant attributes that would make a movie popular are its imdb rating, whether the movie was nominated for a best picture Oscar or not, its critics rating on the Rotten Tomatoes website
+and its genre. But I think that there are several limitations of the study done here because of the collection of data, as mentioned in Part 1, IMDB and Rotten Tomatoes collect data from many visitors on their website, so their opinions can be subjective or biased which affects the randomness of the sample. For example, a movie might get a "Certified Fresh" rating when it might not deserve it.
+
+Similarly, these results are not generalizable because I could have dropped a significant variable that wasn't in the model. For future research I would like to test if the total box office depends on the rating from websites like IMDB.
